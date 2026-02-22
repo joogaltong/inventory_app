@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: inventory-app
+    env: node
+    rootDir: .
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: APP_TOKEN
+        generateValue: true
+      - key: INVENTORY_DATA_DIR
+        value: /data
+    disk:
+      name: inventory-data
+      mountPath: /data
+      sizeGB: 1
