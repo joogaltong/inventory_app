@@ -1,4 +1,11 @@
 const refs = {
+  appShell: document.querySelector(".app-shell"),
+  authGate: document.getElementById("auth-gate"),
+  authForm: document.getElementById("auth-form"),
+  authUsername: document.getElementById("auth-username"),
+  authPassword: document.getElementById("auth-password"),
+  authStatus: document.getElementById("auth-status"),
+
   screenTitle: document.getElementById("screen-title"),
   todayBadge: document.getElementById("today-badge"),
 
@@ -36,6 +43,7 @@ const refs = {
   exportBtn: document.getElementById("export-json-btn"),
   importFile: document.getElementById("import-json-file"),
   clearBtn: document.getElementById("clear-data-btn"),
+  logoutBtn: document.getElementById("logout-btn"),
   settingsStatus: document.getElementById("settings-status"),
 
   companyExcelFile: document.getElementById("company-excel-file"),
@@ -56,6 +64,7 @@ const KEYS = {
   templateMeta: "inventory_v2_company_template_meta",
   templateBlobB64: "inventory_v2_company_template_b64",
   gsheetUrl: "inventory_v2_google_sheet_url",
+  authSession: "inventory_v2_auth_session",
   view: "inventory_v2_active_view",
   legacyTx: "inventory_app_transactions_v1",
   legacyMin: "inventory_app_min_stock_v1",
@@ -75,12 +84,41 @@ const VIEW_LABELS = {
   stock: "재고",
   settings: "설정",
 };
+const VIEW_ORDER = Object.keys(VIEW_LABELS);
+const APP_TITLE = "올파포 4단지 재고관리";
 const VISIBLE_CATEGORIES = ["미화용품", "세제", "소모품"];
 const VISIBLE_CATEGORY_KEYS = new Set(VISIBLE_CATEGORIES.map((v) => normalizeText(v)));
 const STOCK_ZONES = ["전체", "피트니스", "게스트하우스", "계단실"];
 
 const APP_CONFIG = window.APP_CONFIG && typeof window.APP_CONFIG === "object" ? window.APP_CONFIG : {};
+const AUTH_CONFIG = APP_CONFIG.auth && typeof APP_CONFIG.auth === "object" ? APP_CONFIG.auth : {};
 const CLOUD_CONFIG = APP_CONFIG.cloudSync && typeof APP_CONFIG.cloudSync === "object" ? APP_CONFIG.cloudSync : {};
+const SUPABASE_CONFIG = APP_CONFIG.supabase && typeof APP_CONFIG.supabase === "object" ? APP_CONFIG.supabase : {};
+
+const AUTH_USERS = Array.isArray(AUTH_CONFIG.users)
+  ? AUTH_CONFIG.users
+      .map((row) => ({
+        username: String(row?.username || "").trim(),
+        password: String(row?.password || ""),
+      }))
+      .filter((row) => row.username && row.password)
+  : [];
+const AUTH_SESSION_HOURS = Math.max(1, Number(AUTH_CONFIG.sessionHours || 72));
+const AUTH_ENABLED = Boolean(AUTH_CONFIG.enabled && AUTH_USERS.length);
+
+const SUPABASE_PROJECT_REF = String(SUPABASE_CONFIG.projectRef || "").trim();
+const SUPABASE_PROJECT_URL = String(
+  SUPABASE_CONFIG.projectUrl || (SUPABASE_PROJECT_REF ? `https://${SUPABASE_PROJECT_REF}.supabase.co` : "")
+)
+  .trim()
+  .replace(/\/+$/, "");
+const SUPABASE_ANON_KEY = String(SUPABASE_CONFIG.anonKey || "").trim();
+const SUPABASE_STATE_TABLE = String(SUPABASE_CONFIG.stateTable || "inventory_state").trim();
+const SUPABASE_STATE_ROW_ID = String(SUPABASE_CONFIG.stateRowId || "4danji-main").trim();
+const SUPABASE_SYNC_ENABLED = Boolean(
+  SUPABASE_CONFIG.enabled && SUPABASE_PROJECT_URL && SUPABASE_ANON_KEY && SUPABASE_STATE_TABLE && SUPABASE_STATE_ROW_ID
+);
+
 const CLOUD_SYNC_ENABLED = Boolean(CLOUD_CONFIG.enabled);
 const CLOUD_API_BASE = String(CLOUD_CONFIG.baseUrl || "").trim();
 const CLOUD_API_TOKEN = String(CLOUD_CONFIG.token || "").trim();
@@ -88,16 +126,37 @@ const CLOUD_PULL_ON_INIT = CLOUD_CONFIG.pullOnInit !== false;
 const CLOUD_AUTO_PUSH = CLOUD_CONFIG.autoPush !== false;
 const CLOUD_PUSH_DEBOUNCE_MS = Math.max(300, Number(CLOUD_CONFIG.pushDebounceMs || 1200));
 const CLOUD_REQUEST_TIMEOUT_MS = Math.max(3000, Number(CLOUD_CONFIG.timeoutMs || 15000));
+const REMOTE_SYNC_ENABLED = CLOUD_SYNC_ENABLED || SUPABASE_SYNC_ENABLED;
 
 let selectedType = "전체";
 let selectedStockZone = "전체";
 let companyTemplateBuffer = null;
-let cloudHydrated = !CLOUD_SYNC_ENABLED;
+let cloudHydrated = !REMOTE_SYNC_ENABLED;
 let cloudPushInFlight = false;
 let cloudPushQueued = false;
 let cloudPushTimer = null;
 let cloudPushSuspendCount = 0;
 let cloudPushHadError = false;
+let activeViewName = "home";
+
+function applySafeAreaFallbackForIOS() {
+  const ua = navigator.userAgent || "";
+  const isIOS = /iPhone|iPad|iPod/i.test(ua);
+  const isNativeApp =
+    Boolean(window.Capacitor?.isNativePlatform?.()) ||
+    Boolean(window.Capacitor && typeof window.Capacitor === "object");
+
+  const rootStyle = document.documentElement.style;
+  if (isIOS && isNativeApp) {
+    // iOS WebView에서 env(safe-area-inset-top)이 0으로 잡히는 경우를 위한 강제 보정
+    rootStyle.setProperty("--safe-top-fallback", "56px");
+    rootStyle.setProperty("--safe-bottom-fallback", "20px");
+    return;
+  }
+
+  rootStyle.setProperty("--safe-top-fallback", "0px");
+  rootStyle.setProperty("--safe-bottom-fallback", "0px");
+}
 
 function createId() {
   if (window.crypto?.randomUUID) return window.crypto.randomUUID();
@@ -211,8 +270,108 @@ function makeItemKey(item, rackBarcode, itemBarcode) {
   return `b:${barcodeN}`;
 }
 
+function isAuthEnabled() {
+  return AUTH_ENABLED;
+}
+
+function setAuthStatus(message, isError = false) {
+  if (!refs.authStatus) return;
+  const text = String(message || "").trim();
+  refs.authStatus.textContent = text;
+  refs.authStatus.style.display = text ? "block" : "none";
+  refs.authStatus.style.color = isError ? "#ffd7d7" : "#d8fff0";
+}
+
+function saveAuthSession(username) {
+  saveJSON(
+    KEYS.authSession,
+    {
+      username: String(username || "").trim(),
+      issuedAt: new Date().toISOString(),
+    },
+    { skipSync: true }
+  );
+}
+
+function clearAuthSession() {
+  localStorage.removeItem(KEYS.authSession);
+}
+
+function getValidAuthSession() {
+  if (!isAuthEnabled()) return { username: "", issuedAt: "" };
+  const session = loadJSON(KEYS.authSession, null);
+  const username = String(session?.username || "").trim();
+  const issuedAt = String(session?.issuedAt || "");
+  if (!username || !issuedAt) return null;
+
+  const matchedUser = AUTH_USERS.find((row) => row.username === username);
+  if (!matchedUser) return null;
+
+  const issuedAtMs = Date.parse(issuedAt);
+  if (!Number.isFinite(issuedAtMs)) return null;
+  const ageMs = Date.now() - issuedAtMs;
+  if (ageMs < 0) return null;
+  if (ageMs > AUTH_SESSION_HOURS * 60 * 60 * 1000) return null;
+  return { username, issuedAt };
+}
+
+function setAuthGateVisible(isVisible) {
+  if (!refs.authGate) return;
+  const visible = Boolean(isVisible);
+  refs.authGate.classList.toggle("is-active", visible);
+  refs.authGate.setAttribute("aria-hidden", visible ? "false" : "true");
+  document.body.classList.toggle("auth-locked", visible);
+}
+
+function ensureAuthGateState() {
+  if (!isAuthEnabled()) {
+    setAuthGateVisible(false);
+    if (refs.logoutBtn) refs.logoutBtn.style.display = "none";
+    return;
+  }
+
+  if (refs.logoutBtn) refs.logoutBtn.style.display = "inline-flex";
+  const validSession = getValidAuthSession();
+  if (validSession) {
+    setAuthGateVisible(false);
+    setAuthStatus("");
+    return;
+  }
+
+  clearAuthSession();
+  setAuthStatus("");
+  setAuthGateVisible(true);
+  window.requestAnimationFrame(() => {
+    refs.authUsername?.focus();
+  });
+}
+
+function attemptLogin(username, password) {
+  const user = String(username || "").trim();
+  const pass = String(password || "");
+  if (!user || !pass) return false;
+
+  const matched = AUTH_USERS.find((row) => row.username === user && row.password === pass);
+  if (!matched) return false;
+
+  saveAuthSession(matched.username);
+  setAuthGateVisible(false);
+  setAuthStatus("");
+  if (refs.authForm) refs.authForm.reset();
+  setSettingsStatus(`로그인됨: ${matched.username}`);
+  return true;
+}
+
 function isCloudSyncEnabled() {
   return CLOUD_SYNC_ENABLED;
+}
+
+function isSupabaseSyncEnabled() {
+  return SUPABASE_SYNC_ENABLED;
+}
+
+function isRemoteSyncEnabled() {
+  return REMOTE_SYNC_ENABLED;
 }
 
 function getDefaultGoogleSheetUrl() {
@@ -227,6 +386,13 @@ function buildApiUrl(endpoint) {
   const base = CLOUD_API_BASE.replace(/\/+$/, "");
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
   return `${base}${normalizedPath}`;
+}
+
+function buildSupabaseUrl(endpoint) {
+  const path = String(endpoint || "").trim();
+  if (!path) return SUPABASE_PROJECT_URL;
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return `${SUPABASE_PROJECT_URL}${normalizedPath}`;
 }
 
 function withCloudPushSuspended(callback) {
@@ -269,6 +435,24 @@ async function apiFetch(endpoint, options = {}) {
     headers.set("Content-Type", "application/json");
   }
   return fetchWithTimeout(buildApiUrl(endpoint), { ...options, headers });
+}
+
+async function supabaseFetch(endpoint, options = {}) {
+  const headers = new Headers(options.headers || {});
+  headers.set("apikey", SUPABASE_ANON_KEY);
+  headers.set("Authorization", `Bearer ${SUPABASE_ANON_KEY}`);
+  if (options.body && !(options.body instanceof FormData) && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  return fetchWithTimeout(buildSupabaseUrl(endpoint), { ...options, headers });
+}
+
+function parseSupabaseError(payload, status) {
+  if (payload && typeof payload === "object") {
+    const message = payload.message || payload.error || payload.error_description || payload.hint;
+    if (message) return String(message);
+  }
+  return `HTTP ${status}`;
 }
 
 function normalizeMinStockMap(value) {
@@ -390,7 +574,92 @@ async function clearTemplateOnServer() {
   }
 }
 
+function hasLocalStateToSeed(payload) {
+  if (!payload || typeof payload !== "object") return false;
+  if (Array.isArray(payload.transactions) && payload.transactions.length) return true;
+  if (Array.isArray(payload.baseline) && payload.baseline.length) return true;
+  if (payload.minStock && typeof payload.minStock === "object" && Object.keys(payload.minStock).length) return true;
+  return false;
+}
+
+async function pullStateFromSupabase() {
+  if (!isSupabaseSyncEnabled()) return { hasRemote: false };
+  const endpoint =
+    `/rest/v1/${SUPABASE_STATE_TABLE}` +
+    `?select=id,state,updated_at` +
+    `&id=eq.${encodeURIComponent(SUPABASE_STATE_ROW_ID)}` +
+    `&limit=1`;
+  const response = await supabaseFetch(endpoint, { method: "GET" });
+
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+  if (!response.ok) {
+    throw new Error(parseSupabaseError(payload, response.status));
+  }
+
+  const row = Array.isArray(payload) ? payload[0] : null;
+  if (!row || !row.state || typeof row.state !== "object") {
+    return { hasRemote: false };
+  }
+
+  applyServerStateToLocal(row.state);
+  refs.gsheetUrl.value = loadGsheetUrl();
+  return { hasRemote: true };
+}
+
+async function pushStateToSupabase(reason = "local-change") {
+  if (!isSupabaseSyncEnabled()) return;
+  const row = {
+    id: SUPABASE_STATE_ROW_ID,
+    state: {
+      ...getStatePayloadForServer(),
+      _meta: {
+        source: "inventory-app",
+        reason,
+        savedAt: new Date().toISOString(),
+      },
+    },
+    updated_at: new Date().toISOString(),
+  };
+
+  const response = await supabaseFetch(`/rest/v1/${SUPABASE_STATE_TABLE}?on_conflict=id`, {
+    method: "POST",
+    headers: {
+      Prefer: "resolution=merge-duplicates,return=representation",
+    },
+    body: JSON.stringify([row]),
+  });
+
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+  if (!response.ok) {
+    throw new Error(parseSupabaseError(payload, response.status));
+  }
+}
+
 async function pullStateFromServer() {
+  if (!isRemoteSyncEnabled()) return false;
+
+  if (isSupabaseSyncEnabled()) {
+    const pulled = await pullStateFromSupabase();
+    if (!pulled.hasRemote) {
+      const localPayload = getStatePayloadForServer();
+      if (hasLocalStateToSeed(localPayload)) {
+        await pushStateToSupabase("seed-local-state");
+      }
+    }
+    cloudHydrated = true;
+    return true;
+  }
+
   if (!isCloudSyncEnabled()) return false;
   const response = await apiFetch("/api/state");
   let payload = null;
@@ -433,7 +702,7 @@ async function pullStateFromServer() {
 }
 
 async function pushStateToServer(reason = "local-change") {
-  if (!isCloudSyncEnabled() || !CLOUD_AUTO_PUSH) return;
+  if (!isRemoteSyncEnabled() || !CLOUD_AUTO_PUSH) return;
   if (!cloudHydrated || cloudPushSuspendCount > 0) return;
   if (cloudPushInFlight) {
     cloudPushQueued = true;
@@ -442,18 +711,22 @@ async function pushStateToServer(reason = "local-change") {
 
   cloudPushInFlight = true;
   try {
-    const response = await apiFetch("/api/state", {
-      method: "PUT",
-      body: JSON.stringify({ state: getStatePayloadForServer(), reason }),
-    });
-    let payload = null;
-    try {
-      payload = await response.json();
-    } catch {
-      payload = null;
-    }
-    if (!response.ok || !payload?.ok) {
-      throw new Error(payload?.error || `HTTP ${response.status}`);
+    if (isSupabaseSyncEnabled()) {
+      await pushStateToSupabase(reason);
+    } else {
+      const response = await apiFetch("/api/state", {
+        method: "PUT",
+        body: JSON.stringify({ state: getStatePayloadForServer(), reason }),
+      });
+      let payload = null;
+      try {
+        payload = await response.json();
+      } catch {
+        payload = null;
+      }
+      if (!response.ok || !payload?.ok) {
+        throw new Error(payload?.error || `HTTP ${response.status}`);
+      }
     }
     cloudPushHadError = false;
   } catch (error) {
@@ -469,7 +742,7 @@ async function pushStateToServer(reason = "local-change") {
 }
 
 function scheduleCloudPush(reason = "local-change") {
-  if (!isCloudSyncEnabled() || !CLOUD_AUTO_PUSH) return;
+  if (!isRemoteSyncEnabled() || !CLOUD_AUTO_PUSH) return;
   if (!cloudHydrated || cloudPushSuspendCount > 0) return;
 
   cloudPushQueued = true;
@@ -1475,10 +1748,17 @@ function normalizeView(view) {
 
 function setActiveView(view, { persist = true } = {}) {
   const current = normalizeView(String(view || "").trim());
+  const previous = normalizeView(activeViewName);
+  const prevIndex = VIEW_ORDER.indexOf(previous);
+  const currentIndex = VIEW_ORDER.indexOf(current);
+  const directionClass =
+    previous === current ? "" : currentIndex >= prevIndex ? "is-forward" : "is-backward";
 
   refs.views.forEach((section) => {
     const isActive = section.id === `view-${current}`;
+    section.classList.remove("is-forward", "is-backward");
     section.classList.toggle("is-active", isActive);
+    if (isActive && directionClass) section.classList.add(directionClass);
     section.setAttribute("aria-hidden", isActive ? "false" : "true");
   });
 
@@ -1488,8 +1768,9 @@ function setActiveView(view, { persist = true } = {}) {
     button.setAttribute("aria-selected", isActive ? "true" : "false");
   });
 
-  refs.screenTitle.textContent = VIEW_LABELS[current];
-  document.title = `${VIEW_LABELS[current]} | 재고관리 v2`;
+  refs.screenTitle.textContent = APP_TITLE;
+  document.title = `${APP_TITLE} · ${VIEW_LABELS[current]}`;
+  activeViewName = current;
 
   if (persist) {
     localStorage.setItem(KEYS.view, current);
@@ -1573,8 +1854,9 @@ function renderLowStock(stockRows, minStockMap) {
 
   refs.lowList.innerHTML = "";
 
-  rows.slice(0, 8).forEach((row) => {
+  rows.slice(0, 8).forEach((row, index) => {
     const li = document.createElement("li");
+    li.style.setProperty("--stagger-index", String(index + 1));
     li.innerHTML = `<span>${escapeHtml(row.item)}</span><span>${row.qty} / 최소 ${row.min}</span>`;
     refs.lowList.appendChild(li);
   });
@@ -1595,10 +1877,11 @@ function renderTxList(transactions) {
 
   refs.txList.innerHTML = "";
 
-  rows.forEach((tx) => {
+  rows.forEach((tx, index) => {
     const zone = resolveZoneByRackBarcode(tx.rackBarcode);
     const card = document.createElement("article");
     card.className = "tx-card";
+    card.style.setProperty("--stagger-index", String(Math.min(index, 10)));
     card.innerHTML = `
       <div class="tx-top">
         <div>
@@ -1630,12 +1913,14 @@ function renderStock(stockRows, minStockMap) {
   const visibleRows = getVisibleStockRows(stockRows, { applyZoneFilter: true });
   refs.stockBody.innerHTML = "";
 
-  visibleRows.forEach((row) => {
+  visibleRows.forEach((row, index) => {
     const min = Number(minStockMap[row.key] || 0);
     const isLow = min > 0 && row.qty <= min;
     const zone = resolveZoneByRackBarcode(row.rackBarcode);
 
     const tr = document.createElement("tr");
+    tr.className = "stock-row";
+    tr.style.setProperty("--stagger-index", String(Math.min(index, 14)));
     tr.innerHTML = `
       <td><strong>${escapeHtml(row.item)}</strong></td>
       <td>${escapeHtml(row.category || "-")}</td>
@@ -1731,6 +2016,26 @@ function importFromJsonFile(file) {
 }
 
 function bindEvents() {
+  refs.authForm?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const username = refs.authUsername?.value || "";
+    const password = refs.authPassword?.value || "";
+    const ok = attemptLogin(username, password);
+    if (!ok) {
+      setAuthStatus("아이디 또는 비밀번호를 확인해 주세요.", true);
+      return;
+    }
+    setAuthStatus("");
+  });
+
+  refs.logoutBtn?.addEventListener("click", () => {
+    const ok = confirm("로그아웃할까요?");
+    if (!ok) return;
+    clearAuthSession();
+    ensureAuthGateState();
+    setActiveView("home");
+  });
+
   refs.nav.addEventListener("click", (event) => {
     const button = event.target.closest(".nav-btn");
     if (!button) return;
@@ -1997,6 +2302,8 @@ function bindEvents() {
       } catch (error) {
         setSettingsStatus(`로컬 초기화 완료 (클라우드 템플릿 삭제 실패): ${error.message}`, true);
       }
+    }
+    if (isRemoteSyncEnabled()) {
       scheduleCloudPush("clear-all");
     }
 
@@ -2006,18 +2313,24 @@ function bindEvents() {
 }
 
 async function init() {
+  applySafeAreaFallbackForIOS();
+  window.addEventListener("resize", applySafeAreaFallbackForIOS);
+
   setTodayDefaults();
   migrateLegacyDataIfNeeded();
   bindEvents();
+  ensureAuthGateState();
   refs.gsheetUrl.value = loadGsheetUrl();
 
-  if (isCloudSyncEnabled() && CLOUD_PULL_ON_INIT) {
+  if (isRemoteSyncEnabled() && CLOUD_PULL_ON_INIT) {
     try {
       await pullStateFromServer();
-      setSettingsStatus("클라우드 동기화 연결 완료: 폰/PC가 같은 데이터를 사용합니다.");
+      const syncLabel = isSupabaseSyncEnabled() ? "Supabase" : "클라우드";
+      setSettingsStatus(`${syncLabel} 동기화 연결 완료: 폰/PC가 같은 데이터를 사용합니다.`);
     } catch (error) {
       cloudHydrated = true;
-      setSettingsStatus(`클라우드 연결 실패(로컬 모드 유지): ${error.message}`, true);
+      const syncLabel = isSupabaseSyncEnabled() ? "Supabase" : "클라우드";
+      setSettingsStatus(`${syncLabel} 연결 실패(로컬 모드 유지): ${error.message}`, true);
     }
   } else {
     cloudHydrated = true;
@@ -2055,6 +2368,7 @@ async function init() {
   const savedView = localStorage.getItem(KEYS.view) || "home";
   setActiveView(savedView, { persist: false });
   render();
+  ensureAuthGateState();
 }
 
 init();

@@ -5,7 +5,7 @@
   "main": "app.js",
   "scripts": {
     "start": "npm run build:web && node web-server.js",
-    "build:web": "mkdir -p www && cp index.html styles.css app.js user-config.js www/",
+    "build:web": "mkdir -p www/assets && cp index.html styles.css app.js user-config.js www/ && cp -R assets/. www/assets/",
     "dev:web": "npm run build:web && node web-server.js",
     "cap:sync": "npm run build:web && npx cap sync ios",
     "cap:open": "npx cap open ios"

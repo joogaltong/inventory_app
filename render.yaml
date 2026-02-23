@@ -13,8 +13,4 @@ services:
       - key: APP_TOKEN
         generateValue: true
       - key: INVENTORY_DATA_DIR
-        value: /data
-    disk:
-      name: inventory-data
-      mountPath: /data
-      sizeGB: 1
+        value: /tmp/inventory-data
