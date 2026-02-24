@@ -4,10 +4,12 @@ import io
 import json
 import re
 import sys
+from copy import copy
 from difflib import SequenceMatcher
 from typing import Dict, List, Optional, Tuple
 
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 
 EXPORT_ZONES = ["피트니스", "게스트하우스", "계단실"]
 
@@ -237,6 +239,85 @@ def apply_zone_row_visibility(ws, analyzed: Dict[str, object], allowed_item_keys
         ws.row_dimensions[row].hidden = not visible
 
 
+def estimate_zone_sheet_bounds(source_ws, analyzed: Dict[str, object]) -> Tuple[int, int]:
+    item_rows = analyzed.get("item_rows", [])
+    month_day_to_col = analyzed.get("month_day_to_col", {})
+
+    max_item_row = max([int(info["row"]) for info in item_rows], default=12)
+    max_day_col = max(month_day_to_col.values(), default=24)
+
+    # 날짜영역 오른쪽 합계/보조열을 위해 여유 컬럼 포함
+    max_col = max(max_day_col + 8, 40)
+    source_max_col = int(getattr(source_ws, "max_column", max_col) or max_col)
+    if source_max_col > 0:
+        # 비정상적으로 큰 컬럼 범위(전열 서식) 방지
+        max_col = min(max_col, source_max_col, 180)
+
+    max_row = max(max_item_row + 3, 12)
+    source_max_row = int(getattr(source_ws, "max_row", max_row) or max_row)
+    if source_max_row > 0:
+        # 비정상적으로 큰 행 범위(전행 서식) 방지
+        max_row = min(max_row, source_max_row, 6000)
+
+    return max_row, max_col
+
+
+def create_trimmed_zone_sheet(workbook, source_ws, analyzed: Dict[str, object], title: str):
+    max_row, max_col = estimate_zone_sheet_bounds(source_ws, analyzed)
+
+    if title in workbook.sheetnames:
+        del workbook[title]
+    zone_ws = workbook.create_sheet(title)
+
+    zone_ws.sheet_properties = copy(source_ws.sheet_properties)
+    zone_ws.sheet_format = copy(source_ws.sheet_format)
+    zone_ws.page_margins = copy(source_ws.page_margins)
+    zone_ws.page_setup = copy(source_ws.page_setup)
+    zone_ws.print_options = copy(source_ws.print_options)
+    zone_ws.freeze_panes = source_ws.freeze_panes
+
+    if getattr(source_ws, "auto_filter", None) and source_ws.auto_filter.ref:
+        zone_ws.auto_filter.ref = source_ws.auto_filter.ref
+
+    for col in range(1, max_col + 1):
+        letter = get_column_letter(col)
+        src_dim = source_ws.column_dimensions.get(letter)
+        if not src_dim:
+            continue
+        dst_dim = zone_ws.column_dimensions[letter]
+        dst_dim.width = src_dim.width
+        dst_dim.hidden = src_dim.hidden
+        dst_dim.outlineLevel = src_dim.outlineLevel
+        dst_dim.collapsed = src_dim.collapsed
+
+    for row in range(1, max_row + 1):
+        src_dim = source_ws.row_dimensions.get(row)
+        if not src_dim:
+            continue
+        dst_dim = zone_ws.row_dimensions[row]
+        dst_dim.height = src_dim.height
+        dst_dim.hidden = src_dim.hidden
+        dst_dim.outlineLevel = src_dim.outlineLevel
+        dst_dim.collapsed = src_dim.collapsed
+
+    for row in range(1, max_row + 1):
+        for col in range(1, max_col + 1):
+            src_cell = source_ws.cell(row=row, column=col)
+            dst_cell = zone_ws.cell(row=row, column=col, value=src_cell.value)
+            if src_cell.has_style:
+                dst_cell._style = copy(src_cell._style)
+            if src_cell.hyperlink:
+                dst_cell._hyperlink = copy(src_cell.hyperlink)
+            if src_cell.comment:
+                dst_cell.comment = copy(src_cell.comment)
+
+    for merged in source_ws.merged_cells.ranges:
+        if merged.max_row <= max_row and merged.max_col <= max_col:
+            zone_ws.merge_cells(str(merged))
+
+    return zone_ws
+
+
 def apply_outbound_to_sheet(ws, analyzed: Dict[str, object], transactions: List[Dict[str, object]]) -> Dict[str, object]:
     outbound = [tx for tx in transactions if str(tx.get("type", "")) == "출고" and not bool(tx.get("isInitial"))]
     if not outbound:
@@ -322,8 +403,7 @@ def apply_outbound_by_zones(
     unmatched_logs: List[List[object]] = []
     zone_summaries: List[Dict[str, object]] = []
     for zone in EXPORT_ZONES:
-        zone_ws = workbook.copy_worksheet(source_ws)
-        zone_ws.title = f"4단지_{zone}"
+        zone_ws = create_trimmed_zone_sheet(workbook, source_ws, analyzed, f"4단지_{zone}")
 
         allowed_item_keys = set(
             [

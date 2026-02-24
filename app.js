@@ -1869,14 +1869,18 @@ async function exportCompanyExcelWithOutbound() {
 
   let response;
   try {
+    const requestPayload = {
+      mode: "outbound",
+      transactions: loadTransactions(),
+      file_name: fileName,
+    };
+    // Render/클라우드 모드에서는 서버 저장 템플릿을 우선 사용해 payload 크기를 줄인다.
+    if (!isCloudSyncEnabled()) {
+      requestPayload.template_b64 = arrayBufferToBase64(companyTemplateBuffer.slice(0));
+    }
     response = await apiFetch("/api/export-company-with-outbound", {
       method: "POST",
-      body: JSON.stringify({
-        mode: "outbound",
-        template_b64: arrayBufferToBase64(companyTemplateBuffer.slice(0)),
-        transactions: loadTransactions(),
-        file_name: fileName,
-      }),
+      body: JSON.stringify(requestPayload),
     });
   } catch {
     throw new Error("원본 양식 보존 내보내기 API 연결에 실패했습니다. 서버 주소/실행 상태를 확인해 주세요.");
@@ -1937,15 +1941,19 @@ async function exportCompanyExcelByZones() {
 
   let response;
   try {
+    const requestPayload = {
+      mode: "zones",
+      transactions,
+      baseline_rows: baselineRows,
+      file_name: fileName,
+    };
+    // Render/클라우드 모드에서는 서버 저장 템플릿을 우선 사용해 payload 크기를 줄인다.
+    if (!isCloudSyncEnabled()) {
+      requestPayload.template_b64 = arrayBufferToBase64(companyTemplateBuffer.slice(0));
+    }
     response = await apiFetch("/api/export-company-by-zones", {
       method: "POST",
-      body: JSON.stringify({
-        mode: "zones",
-        template_b64: arrayBufferToBase64(companyTemplateBuffer.slice(0)),
-        transactions,
-        baseline_rows: baselineRows,
-        file_name: fileName,
-      }),
+      body: JSON.stringify(requestPayload),
     });
   } catch {
     throw new Error("원본 양식 보존 구역내보내기 API 연결에 실패했습니다. 서버 주소/실행 상태를 확인해 주세요.");
