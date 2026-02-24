@@ -714,6 +714,13 @@ h1 {
   gap: 10px;
 }
 
+.input-action-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
 input,
 select,
 button {
@@ -744,6 +751,26 @@ select:focus {
   outline: none;
   border-color: #89b8ec;
   box-shadow: 0 0 0 4px rgba(0, 114, 207, 0.12);
+}
+
+.scan-btn {
+  min-width: 72px;
+  height: 44px;
+  border-radius: 12px;
+  border: 1px solid #bfd7f2;
+  background: linear-gradient(180deg, #ffffff, #eaf3ff);
+  color: #21476f;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+  transition:
+    transform var(--dur-fast) var(--ease-snappy),
+    box-shadow var(--dur-fast) var(--ease-snappy),
+    border-color var(--dur-fast) var(--ease-snappy);
+}
+
+.scan-btn:active {
+  transform: scale(0.97);
 }
 
 .primary-btn {
@@ -783,6 +810,12 @@ select:focus {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+}
+
+.stock-search-input {
+  flex: 1;
+  min-width: 240px;
 }
 
 .segmented {
@@ -1073,6 +1106,90 @@ select:focus {
   color: var(--sub);
 }
 
+.scanner-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1600;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background: rgba(5, 21, 35, 0.72);
+  backdrop-filter: blur(5px) saturate(120%);
+}
+
+.scanner-modal.is-active {
+  display: flex;
+  animation: auth-fade-in var(--dur-fast) var(--ease-soft);
+}
+
+.scanner-card {
+  width: min(560px, 100%);
+  border-radius: 20px;
+  border: 1px solid #d2e3f8;
+  background: linear-gradient(180deg, #ffffff, #f4f9ff);
+  box-shadow: 0 22px 50px rgba(5, 21, 35, 0.34);
+  padding: 14px;
+}
+
+.scanner-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.scanner-head h3 {
+  margin: 0;
+  font-size: 18px;
+  letter-spacing: -0.01em;
+}
+
+.scanner-close-btn {
+  min-width: 62px;
+  height: 36px;
+  border-radius: 10px;
+  border: 1px solid #c7daef;
+  background: linear-gradient(180deg, #ffffff, #edf5ff);
+  color: #355a80;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.scanner-video-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  border-radius: 16px;
+  overflow: hidden;
+  border: 1px solid #d3e2f3;
+  background: #0f2030;
+}
+
+.scanner-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.scanner-overlay {
+  position: absolute;
+  inset: 14% 10%;
+  border: 2px solid rgba(88, 255, 195, 0.92);
+  border-radius: 16px;
+  box-shadow: 0 0 0 9999px rgba(6, 22, 34, 0.35);
+  pointer-events: none;
+}
+
+.scanner-status {
+  margin: 10px 2px 2px;
+  color: #375575;
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .bottom-nav {
   position: fixed;
   left: 50%;
@@ -1267,6 +1384,14 @@ select:focus {
     grid-template-columns: 1fr;
   }
 
+  .input-action-row {
+    grid-template-columns: minmax(0, 1fr) 66px;
+  }
+
+  .scan-btn {
+    min-width: 0;
+  }
+
   .toolbar {
     flex-direction: column;
     align-items: stretch;
@@ -1275,6 +1400,10 @@ select:focus {
   .stock-toolbar .segmented {
     width: 100%;
     justify-content: space-between;
+  }
+
+  .stock-search-input {
+    min-width: 0;
   }
 
   .sync-row {
@@ -1296,6 +1425,19 @@ select:focus {
   .nav-btn {
     min-height: 40px;
     font-size: 12px;
+  }
+
+  .scanner-card {
+    border-radius: 16px;
+    padding: 12px;
+  }
+
+  .scanner-head h3 {
+    font-size: 16px;
+  }
+
+  .scanner-overlay {
+    inset: 16% 8%;
   }
 }
 

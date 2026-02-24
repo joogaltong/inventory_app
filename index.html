@@ -116,13 +116,19 @@
               </label>
               <label class="field">
                 <span>렉바코드 (선택)</span>
-                <input id="tx-rack" placeholder="예: 4F-A1" />
+                <div class="input-action-row">
+                  <input id="tx-rack" placeholder="예: 4F-A1" />
+                  <button id="scan-rack-btn" type="button" class="scan-btn">스캔</button>
+                </div>
               </label>
             </div>
 
             <label class="field">
               <span>물품바코드 (선택)</span>
-              <input id="tx-barcode" placeholder="예: 880..." />
+              <div class="input-action-row">
+                <input id="tx-barcode" placeholder="예: 880..." />
+                <button id="scan-barcode-btn" type="button" class="scan-btn">스캔</button>
+              </div>
             </label>
 
             <label class="field">
@@ -163,6 +169,7 @@
           </div>
 
           <div class="stock-toolbar">
+            <input id="stock-search" class="stock-search-input" placeholder="품목명/렉바코드/물품바코드 검색" />
             <div id="stock-zone-filter" class="segmented">
               <button type="button" class="seg is-active" data-zone="전체">전체</button>
               <button type="button" class="seg" data-zone="피트니스">피트니스</button>
@@ -260,6 +267,20 @@
         <button class="nav-btn" data-view="settings" type="button">설정</button>
       </nav>
     </main>
+
+    <section id="barcode-scanner-modal" class="scanner-modal" aria-hidden="true">
+      <article class="scanner-card">
+        <div class="scanner-head">
+          <h3 id="scanner-title">바코드 스캔</h3>
+          <button id="scanner-close-btn" type="button" class="scanner-close-btn">닫기</button>
+        </div>
+        <div class="scanner-video-wrap">
+          <video id="scanner-video" class="scanner-video" autoplay playsinline muted></video>
+          <div class="scanner-overlay" aria-hidden="true"></div>
+        </div>
+        <p id="scanner-status" class="scanner-status">카메라 준비 중...</p>
+      </article>
+    </section>
 
     <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
     <script src="./user-config.js"></script>

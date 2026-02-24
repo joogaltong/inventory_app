@@ -28,7 +28,9 @@ const refs = {
   txQty: document.getElementById("tx-qty"),
   txDate: document.getElementById("tx-date"),
   txRack: document.getElementById("tx-rack"),
+  scanRackBtn: document.getElementById("scan-rack-btn"),
   txBarcode: document.getElementById("tx-barcode"),
+  scanBarcodeBtn: document.getElementById("scan-barcode-btn"),
   txNote: document.getElementById("tx-note"),
   txFormStatus: document.getElementById("tx-form-status"),
   txSearch: document.getElementById("tx-search"),
@@ -38,6 +40,7 @@ const refs = {
 
   stockBody: document.getElementById("stock-body"),
   stockEmpty: document.getElementById("stock-empty"),
+  stockSearch: document.getElementById("stock-search"),
   stockZoneFilter: document.getElementById("stock-zone-filter"),
 
   exportBtn: document.getElementById("export-json-btn"),
@@ -55,6 +58,12 @@ const refs = {
   gsheetSyncBtn: document.getElementById("gsheet-sync-btn"),
   gsheetCsvFile: document.getElementById("gsheet-csv-file"),
   gsheetStatus: document.getElementById("gsheet-status"),
+
+  scannerModal: document.getElementById("barcode-scanner-modal"),
+  scannerTitle: document.getElementById("scanner-title"),
+  scannerVideo: document.getElementById("scanner-video"),
+  scannerStatus: document.getElementById("scanner-status"),
+  scannerCloseBtn: document.getElementById("scanner-close-btn"),
 };
 
 const KEYS = {
@@ -89,6 +98,15 @@ const APP_TITLE = "올파포 4단지 재고관리";
 const VISIBLE_CATEGORIES = ["미화용품", "세제", "소모품"];
 const VISIBLE_CATEGORY_KEYS = new Set(VISIBLE_CATEGORIES.map((v) => normalizeText(v)));
 const STOCK_ZONES = ["전체", "피트니스", "게스트하우스", "계단실"];
+const DEFAULT_SCAN_FORMATS = [
+  "code_128",
+  "ean_13",
+  "ean_8",
+  "upc_a",
+  "upc_e",
+  "codabar",
+  "qr_code",
+];
 
 const APP_CONFIG = window.APP_CONFIG && typeof window.APP_CONFIG === "object" ? window.APP_CONFIG : {};
 const AUTH_CONFIG = APP_CONFIG.auth && typeof APP_CONFIG.auth === "object" ? APP_CONFIG.auth : {};
@@ -138,6 +156,12 @@ let cloudPushTimer = null;
 let cloudPushSuspendCount = 0;
 let cloudPushHadError = false;
 let activeViewName = "home";
+let scannerStream = null;
+let scannerDetector = null;
+let scannerTimer = null;
+let scannerDetectBusy = false;
+let scannerIsActive = false;
+let scannerTarget = "item";
 
 function applySafeAreaFallbackForIOS() {
   const ua = navigator.userAgent || "";
@@ -1361,6 +1385,162 @@ function setTxFormStatus(message, isError = false) {
   refs.txFormStatus.style.color = isError ? "#b73333" : "#5d6f89";
 }
 
+function canUseCameraBarcodeScanner() {
+  return (
+    typeof window !== "undefined" &&
+    "BarcodeDetector" in window &&
+    navigator.mediaDevices &&
+    typeof navigator.mediaDevices.getUserMedia === "function"
+  );
+}
+
+function setScannerStatus(message, isError = false) {
+  if (!refs.scannerStatus) return;
+  refs.scannerStatus.textContent = String(message || "");
+  refs.scannerStatus.style.color = isError ? "#b73333" : "#375575";
+}
+
+function setScannerModalVisible(isVisible) {
+  if (!refs.scannerModal) return;
+  const visible = Boolean(isVisible);
+  refs.scannerModal.classList.toggle("is-active", visible);
+  refs.scannerModal.setAttribute("aria-hidden", visible ? "false" : "true");
+}
+
+function stopScannerLoop() {
+  if (scannerTimer) {
+    clearTimeout(scannerTimer);
+    scannerTimer = null;
+  }
+  scannerDetectBusy = false;
+  scannerIsActive = false;
+}
+
+async function stopScannerCamera() {
+  stopScannerLoop();
+  if (scannerStream) {
+    scannerStream.getTracks().forEach((track) => {
+      try {
+        track.stop();
+      } catch {
+        // track stop 실패는 무시
+      }
+    });
+    scannerStream = null;
+  }
+
+  if (refs.scannerVideo) {
+    try {
+      refs.scannerVideo.pause();
+    } catch {
+      // video pause 실패는 무시
+    }
+    refs.scannerVideo.srcObject = null;
+  }
+}
+
+async function closeBarcodeScanner() {
+  await stopScannerCamera();
+  setScannerModalVisible(false);
+}
+
+function scheduleScannerDetectTick() {
+  if (!scannerIsActive) return;
+  scannerTimer = window.setTimeout(() => {
+    void runScannerDetectTick();
+  }, 120);
+}
+
+async function runScannerDetectTick() {
+  if (!scannerIsActive) return;
+  if (scannerDetectBusy) {
+    scheduleScannerDetectTick();
+    return;
+  }
+  if (!scannerDetector || !refs.scannerVideo || refs.scannerVideo.readyState < 2) {
+    scheduleScannerDetectTick();
+    return;
+  }
+
+  scannerDetectBusy = true;
+  try {
+    const detected = await scannerDetector.detect(refs.scannerVideo);
+    const first = Array.isArray(detected) ? detected.find((row) => String(row?.rawValue || "").trim()) : null;
+    const value = first ? String(first.rawValue || "").trim() : "";
+    if (value) {
+      if (scannerTarget === "rack") {
+        refs.txRack.value = value;
+        setTxFormStatus(`렉바코드 스캔 완료: ${value}`);
+      } else {
+        refs.txBarcode.value = value;
+        setTxFormStatus(`물품바코드 스캔 완료: ${value}`);
+      }
+      await closeBarcodeScanner();
+      return;
+    }
+  } catch {
+    // 일부 기기에서 일시적으로 detect 오류가 발생할 수 있어 재시도
+  } finally {
+    scannerDetectBusy = false;
+  }
+
+  scheduleScannerDetectTick();
+}
+
+async function createBarcodeDetector() {
+  const Detector = window.BarcodeDetector;
+  if (!Detector) throw new Error("이 브라우저는 바코드 스캔을 지원하지 않습니다.");
+
+  if (typeof Detector.getSupportedFormats !== "function") {
+    return new Detector();
+  }
+
+  const supported = await Detector.getSupportedFormats();
+  const available = Array.isArray(supported) ? supported : [];
+  const formats = DEFAULT_SCAN_FORMATS.filter((fmt) => available.includes(fmt));
+  if (!formats.length) return new Detector();
+  return new Detector({ formats });
+}
+
+async function openBarcodeScanner(target) {
+  if (!canUseCameraBarcodeScanner()) {
+    setTxFormStatus("현재 기기/브라우저는 카메라 자동 스캔을 지원하지 않습니다. 직접 입력해 주세요.", true);
+    return;
+  }
+
+  const nextTarget = target === "rack" ? "rack" : "item";
+  scannerTarget = nextTarget;
+  if (refs.scannerTitle) {
+    refs.scannerTitle.textContent = nextTarget === "rack" ? "렉바코드 스캔" : "물품바코드 스캔";
+  }
+  setScannerStatus("카메라를 여는 중...");
+  setScannerModalVisible(true);
+
+  try {
+    await stopScannerCamera();
+    scannerDetector = await createBarcodeDetector();
+
+    scannerStream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        facingMode: { ideal: "environment" },
+      },
+    });
+
+    if (!refs.scannerVideo) throw new Error("카메라 뷰를 찾지 못했습니다.");
+    refs.scannerVideo.srcObject = scannerStream;
+    await refs.scannerVideo.play();
+
+    setScannerStatus("바코드를 화면 중앙에 맞춰주세요.");
+    scannerIsActive = true;
+    scheduleScannerDetectTick();
+  } catch (error) {
+    await closeBarcodeScanner();
+    const message = error && typeof error === "object" && "message" in error ? error.message : String(error || "");
+    setTxFormStatus(`카메라 스캔 실패: ${message || "카메라 접근 권한을 확인해 주세요."}`, true);
+  }
+}
+
 function rebuildInitialTransactionsFromBaseline(baselineRows) {
   const nonInitial = loadTransactions().filter((tx) => !tx.isInitial);
   const today = formatDateValue(new Date().toISOString());
@@ -1910,7 +2090,14 @@ function renderTxList(transactions) {
 }
 
 function renderStock(stockRows, minStockMap) {
-  const visibleRows = getVisibleStockRows(stockRows, { applyZoneFilter: true });
+  const keyword = String(refs.stockSearch?.value || "").trim().toLowerCase();
+  let visibleRows = getVisibleStockRows(stockRows, { applyZoneFilter: true });
+  if (keyword) {
+    visibleRows = visibleRows.filter((row) => {
+      const haystack = `${row.item} ${row.rackBarcode} ${row.itemBarcode}`.toLowerCase();
+      return haystack.includes(keyword);
+    });
+  }
   refs.stockBody.innerHTML = "";
 
   visibleRows.forEach((row, index) => {
@@ -2048,6 +2235,33 @@ function bindEvents() {
     });
   });
 
+  refs.scanRackBtn?.addEventListener("click", () => {
+    void openBarcodeScanner("rack");
+  });
+
+  refs.scanBarcodeBtn?.addEventListener("click", () => {
+    void openBarcodeScanner("item");
+  });
+
+  refs.scannerCloseBtn?.addEventListener("click", () => {
+    void closeBarcodeScanner();
+  });
+
+  refs.scannerModal?.addEventListener("click", (event) => {
+    if (event.target === refs.scannerModal) {
+      void closeBarcodeScanner();
+    }
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) return;
+    void closeBarcodeScanner();
+  });
+
+  window.addEventListener("beforeunload", () => {
+    void stopScannerCamera();
+  });
+
   refs.txForm.addEventListener("submit", (event) => {
     event.preventDefault();
 
@@ -2174,6 +2388,8 @@ function bindEvents() {
     render();
   });
 
+  refs.stockSearch?.addEventListener("input", render);
+
   refs.stockZoneFilter.addEventListener("click", (event) => {
     const button = event.target.closest(".seg");
     if (!button) return;
@@ -2265,6 +2481,8 @@ function bindEvents() {
   refs.clearBtn.addEventListener("click", async () => {
     const ok = confirm("모든 거래/재고 기준 데이터를 초기화할까요?");
     if (!ok) return;
+
+    await closeBarcodeScanner();
 
     withCloudPushSuspended(() => {
       saveJSON(KEYS.tx, [], { skipSync: true });
