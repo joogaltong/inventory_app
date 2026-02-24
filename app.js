@@ -162,6 +162,8 @@ let scannerTimer = null;
 let scannerDetectBusy = false;
 let scannerIsActive = false;
 let scannerTarget = "item";
+let scannerReader = null;
+let scannerControls = null;
 
 function applySafeAreaFallbackForIOS() {
   const ua = navigator.userAgent || "";
@@ -1385,13 +1387,20 @@ function setTxFormStatus(message, isError = false) {
   refs.txFormStatus.style.color = isError ? "#b73333" : "#5d6f89";
 }
 
+function hasMediaCaptureSupport() {
+  return Boolean(navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === "function");
+}
+
+function hasNativeBarcodeDetectorSupport() {
+  return typeof window !== "undefined" && "BarcodeDetector" in window;
+}
+
+function hasZxingScannerSupport() {
+  return Boolean(window.ZXingBrowser && typeof window.ZXingBrowser.BrowserMultiFormatReader === "function");
+}
+
 function canUseCameraBarcodeScanner() {
-  return (
-    typeof window !== "undefined" &&
-    "BarcodeDetector" in window &&
-    navigator.mediaDevices &&
-    typeof navigator.mediaDevices.getUserMedia === "function"
-  );
+  return hasMediaCaptureSupport() && (hasNativeBarcodeDetectorSupport() || hasZxingScannerSupport());
 }
 
 function setScannerStatus(message, isError = false) {
@@ -1418,6 +1427,24 @@ function stopScannerLoop() {
 
 async function stopScannerCamera() {
   stopScannerLoop();
+  if (scannerControls && typeof scannerControls.stop === "function") {
+    try {
+      scannerControls.stop();
+    } catch {
+      // scanner control stop 실패는 무시
+    }
+  }
+  scannerControls = null;
+
+  if (scannerReader && typeof scannerReader.reset === "function") {
+    try {
+      scannerReader.reset();
+    } catch {
+      // scanner reader reset 실패는 무시
+    }
+  }
+  scannerReader = null;
+
   if (scannerStream) {
     scannerStream.getTracks().forEach((track) => {
       try {
@@ -1502,9 +1529,68 @@ async function createBarcodeDetector() {
   return new Detector({ formats });
 }
 
+async function startNativeBarcodeDetectorScan() {
+  await stopScannerCamera();
+  scannerDetector = await createBarcodeDetector();
+
+  scannerStream = await navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: {
+      facingMode: { ideal: "environment" },
+    },
+  });
+
+  if (!refs.scannerVideo) throw new Error("카메라 뷰를 찾지 못했습니다.");
+  refs.scannerVideo.srcObject = scannerStream;
+  await refs.scannerVideo.play();
+
+  setScannerStatus("바코드를 화면 중앙에 맞춰주세요. (기본 스캐너)");
+  scannerIsActive = true;
+  scheduleScannerDetectTick();
+}
+
+async function startZxingFallbackScan() {
+  await stopScannerCamera();
+  if (!hasZxingScannerSupport()) {
+    throw new Error("대체 스캔 라이브러리를 불러오지 못했습니다.");
+  }
+  if (!refs.scannerVideo) throw new Error("카메라 뷰를 찾지 못했습니다.");
+
+  const ZXingBrowser = window.ZXingBrowser;
+  scannerReader = new ZXingBrowser.BrowserMultiFormatReader(undefined, { delayBetweenScanAttempts: 120 });
+
+  scannerIsActive = true;
+  setScannerStatus("바코드를 화면 중앙에 맞춰주세요. (호환 스캐너)");
+  scannerControls = await scannerReader.decodeFromConstraints(
+    {
+      audio: false,
+      video: {
+        facingMode: { ideal: "environment" },
+      },
+    },
+    refs.scannerVideo,
+    (result) => {
+      if (!scannerIsActive) return;
+      if (scannerDetectBusy) return;
+      const value = String(result?.getText?.() || "").trim();
+      if (!value) return;
+
+      scannerDetectBusy = true;
+      if (scannerTarget === "rack") {
+        refs.txRack.value = value;
+        setTxFormStatus(`렉바코드 스캔 완료: ${value}`);
+      } else {
+        refs.txBarcode.value = value;
+        setTxFormStatus(`물품바코드 스캔 완료: ${value}`);
+      }
+      void closeBarcodeScanner();
+    }
+  );
+}
+
 async function openBarcodeScanner(target) {
   if (!canUseCameraBarcodeScanner()) {
-    setTxFormStatus("현재 기기/브라우저는 카메라 자동 스캔을 지원하지 않습니다. 직접 입력해 주세요.", true);
+    setTxFormStatus("현재 브라우저는 자동 스캔을 지원하지 않습니다. Safari/Chrome 최신버전에서 다시 시도해 주세요.", true);
     return;
   }
 
@@ -1517,23 +1603,11 @@ async function openBarcodeScanner(target) {
   setScannerModalVisible(true);
 
   try {
-    await stopScannerCamera();
-    scannerDetector = await createBarcodeDetector();
-
-    scannerStream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        facingMode: { ideal: "environment" },
-      },
-    });
-
-    if (!refs.scannerVideo) throw new Error("카메라 뷰를 찾지 못했습니다.");
-    refs.scannerVideo.srcObject = scannerStream;
-    await refs.scannerVideo.play();
-
-    setScannerStatus("바코드를 화면 중앙에 맞춰주세요.");
-    scannerIsActive = true;
-    scheduleScannerDetectTick();
+    if (hasNativeBarcodeDetectorSupport()) {
+      await startNativeBarcodeDetectorScan();
+      return;
+    }
+    await startZxingFallbackScan();
   } catch (error) {
     await closeBarcodeScanner();
     const message = error && typeof error === "object" && "message" in error ? error.message : String(error || "");
