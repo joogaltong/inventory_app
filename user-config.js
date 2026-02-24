@@ -8,7 +8,7 @@ window.APP_CONFIG = {
     users: [{ username: "admin", password: "1234" }],
   },
   supabase: {
-    enabled: true,
+    enabled: false,
     projectRef: "endoewncpfjneqphvxvv",
     projectUrl: "https://endoewncpfjneqphvxvv.supabase.co",
     anonKey:
