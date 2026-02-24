@@ -401,6 +401,12 @@ function isRemoteSyncEnabled() {
   return REMOTE_SYNC_ENABLED;
 }
 
+function getRemoteSyncLabel() {
+  if (isCloudSyncEnabled()) return "클라우드";
+  if (isSupabaseSyncEnabled()) return "Supabase";
+  return "원격";
+}
+
 function getDefaultGoogleSheetUrl() {
   return String(APP_CONFIG.defaultGoogleSheetUrl || "").trim();
 }
@@ -477,7 +483,14 @@ async function supabaseFetch(endpoint, options = {}) {
 function parseSupabaseError(payload, status) {
   if (payload && typeof payload === "object") {
     const message = payload.message || payload.error || payload.error_description || payload.hint;
-    if (message) return String(message);
+    if (message) {
+      const text = String(message);
+      const lowered = text.toLowerCase();
+      if (lowered.includes("quota") && lowered.includes("exceeded")) {
+        return "Supabase 사용량 한도를 초과했습니다.";
+      }
+      return text;
+    }
   }
   return `HTTP ${status}`;
 }
@@ -685,55 +698,62 @@ async function pushStateToSupabase(reason = "local-change") {
 async function pullStateFromServer() {
   if (!isRemoteSyncEnabled()) return false;
 
-  if (isSupabaseSyncEnabled()) {
-    const pulled = await pullStateFromSupabase();
-    if (!pulled.hasRemote) {
-      const localPayload = getStatePayloadForServer();
-      if (hasLocalStateToSeed(localPayload)) {
-        await pushStateToSupabase("seed-local-state");
-      }
-    }
-    cloudHydrated = true;
-    return true;
-  }
-
-  if (!isCloudSyncEnabled()) return false;
-  const response = await apiFetch("/api/state");
-  let payload = null;
-  try {
-    payload = await response.json();
-  } catch {
-    payload = null;
-  }
-  if (!response.ok || !payload?.ok || !payload.state) {
-    throw new Error(payload?.error || `HTTP ${response.status}`);
-  }
-
-  applyServerStateToLocal(payload.state);
-  refs.gsheetUrl.value = loadGsheetUrl();
-
-  const remoteTemplateSavedAt = String(payload.state?.templateMeta?.savedAt || "");
-  const localTemplateMeta = loadJSON(KEYS.templateMeta, {});
-  const localTemplateSavedAt = String(localTemplateMeta?.savedAt || "");
-
-  if (payload.state?.templateAvailable) {
-    const shouldFetchTemplate = !companyTemplateBuffer || remoteTemplateSavedAt !== localTemplateSavedAt;
-    if (shouldFetchTemplate) {
-      try {
-        await pullTemplateFromServer();
-      } catch (error) {
-        console.warn("[cloud-sync] template pull failed:", error.message || error);
-      }
-    }
-  } else {
-    companyTemplateBuffer = null;
+  if (isCloudSyncEnabled()) {
     try {
-      await clearCompanyTemplateBuffer();
-    } catch {
-      // 로컬 템플릿 삭제 실패는 무시
+      const response = await apiFetch("/api/state");
+      let payload = null;
+      try {
+        payload = await response.json();
+      } catch {
+        payload = null;
+      }
+      if (!response.ok || !payload?.ok || !payload.state) {
+        throw new Error(payload?.error || `HTTP ${response.status}`);
+      }
+
+      applyServerStateToLocal(payload.state);
+      refs.gsheetUrl.value = loadGsheetUrl();
+
+      const remoteTemplateSavedAt = String(payload.state?.templateMeta?.savedAt || "");
+      const localTemplateMeta = loadJSON(KEYS.templateMeta, {});
+      const localTemplateSavedAt = String(localTemplateMeta?.savedAt || "");
+
+      if (payload.state?.templateAvailable) {
+        const shouldFetchTemplate = !companyTemplateBuffer || remoteTemplateSavedAt !== localTemplateSavedAt;
+        if (shouldFetchTemplate) {
+          try {
+            await pullTemplateFromServer();
+          } catch (error) {
+            console.warn("[cloud-sync] template pull failed:", error.message || error);
+          }
+        }
+      } else {
+        companyTemplateBuffer = null;
+        try {
+          await clearCompanyTemplateBuffer();
+        } catch {
+          // 로컬 템플릿 삭제 실패는 무시
+        }
+      }
+
+      cloudHydrated = true;
+      return true;
+    } catch (cloudError) {
+      if (!isSupabaseSyncEnabled()) {
+        throw cloudError;
+      }
+      console.warn("[cloud-sync] cloud pull failed, trying Supabase:", cloudError.message || cloudError);
     }
   }
 
+  if (!isSupabaseSyncEnabled()) return false;
+  const pulled = await pullStateFromSupabase();
+  if (!pulled.hasRemote) {
+    const localPayload = getStatePayloadForServer();
+    if (hasLocalStateToSeed(localPayload)) {
+      await pushStateToSupabase("seed-local-state");
+    }
+  }
   cloudHydrated = true;
   return true;
 }
@@ -748,22 +768,32 @@ async function pushStateToServer(reason = "local-change") {
 
   cloudPushInFlight = true;
   try {
-    if (isSupabaseSyncEnabled()) {
+    if (isCloudSyncEnabled()) {
+      try {
+        const response = await apiFetch("/api/state", {
+          method: "PUT",
+          body: JSON.stringify({ state: getStatePayloadForServer(), reason }),
+        });
+        let payload = null;
+        try {
+          payload = await response.json();
+        } catch {
+          payload = null;
+        }
+        if (!response.ok || !payload?.ok) {
+          throw new Error(payload?.error || `HTTP ${response.status}`);
+        }
+      } catch (cloudError) {
+        if (!isSupabaseSyncEnabled()) {
+          throw cloudError;
+        }
+        console.warn("[cloud-sync] cloud push failed, trying Supabase:", cloudError.message || cloudError);
+        await pushStateToSupabase(`${reason}-fallback`);
+      }
+    } else if (isSupabaseSyncEnabled()) {
       await pushStateToSupabase(reason);
     } else {
-      const response = await apiFetch("/api/state", {
-        method: "PUT",
-        body: JSON.stringify({ state: getStatePayloadForServer(), reason }),
-      });
-      let payload = null;
-      try {
-        payload = await response.json();
-      } catch {
-        payload = null;
-      }
-      if (!response.ok || !payload?.ok) {
-        throw new Error(payload?.error || `HTTP ${response.status}`);
-      }
+      return;
     }
     cloudPushHadError = false;
   } catch (error) {
@@ -2650,11 +2680,11 @@ async function init() {
   if (isRemoteSyncEnabled() && CLOUD_PULL_ON_INIT) {
     try {
       await pullStateFromServer();
-      const syncLabel = isSupabaseSyncEnabled() ? "Supabase" : "클라우드";
+      const syncLabel = getRemoteSyncLabel();
       setSettingsStatus(`${syncLabel} 동기화 연결 완료: 폰/PC가 같은 데이터를 사용합니다.`);
     } catch (error) {
       cloudHydrated = true;
-      const syncLabel = isSupabaseSyncEnabled() ? "Supabase" : "클라우드";
+      const syncLabel = getRemoteSyncLabel();
       setSettingsStatus(`${syncLabel} 연결 실패(로컬 모드 유지): ${error.message}`, true);
     }
   } else {
