@@ -470,6 +470,63 @@ async function apiFetch(endpoint, options = {}) {
   return fetchWithTimeout(buildApiUrl(endpoint), { ...options, headers });
 }
 
+function waitMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+async function warmupCloudServer() {
+  if (!isCloudSyncEnabled()) return;
+  try {
+    await apiFetch("/api/health", { method: "GET", timeoutMs: Math.min(EXPORT_API_TIMEOUT_MS, 45000) });
+  } catch {
+    // 웜업 실패는 본 요청에서 재평가
+  }
+}
+
+async function callExportApiWithRetry(endpoint, requestPayload) {
+  const maxAttempts = isCloudSyncEnabled() ? 2 : 1;
+  let lastError = null;
+
+  if (isCloudSyncEnabled()) {
+    await warmupCloudServer();
+  }
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    let response = null;
+    try {
+      response = await apiFetch(endpoint, {
+        method: "POST",
+        timeoutMs: EXPORT_API_TIMEOUT_MS,
+        body: JSON.stringify(requestPayload),
+      });
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxAttempts) {
+        await waitMs(1200 * attempt);
+        continue;
+      }
+      throw new Error("원본 양식 보존 내보내기 API 연결에 실패했습니다. 서버 주소/실행 상태를 확인해 주세요.");
+    }
+
+    if (response.status === 502 || response.status === 503 || response.status === 504) {
+      if (attempt < maxAttempts) {
+        await waitMs(1200 * attempt);
+        continue;
+      }
+      throw new Error(
+        `HTTP ${response.status} (서버 처리 중 중단). Render 무료 인스턴스 슬립/타임아웃 또는 메모리 부족일 수 있습니다. 잠시 후 다시 시도해 주세요.`
+      );
+    }
+
+    return response;
+  }
+
+  if (lastError) {
+    throw new Error("원본 양식 보존 내보내기 API 연결에 실패했습니다. 서버 주소/실행 상태를 확인해 주세요.");
+  }
+  throw new Error("내보내기 요청 처리에 실패했습니다.");
+}
+
 async function supabaseFetch(endpoint, options = {}) {
   const headers = new Headers(options.headers || {});
   headers.set("apikey", SUPABASE_ANON_KEY);
@@ -1898,25 +1955,16 @@ async function exportCompanyExcelWithOutbound() {
   const today = formatDateValue(new Date().toISOString());
   const fileName = `4단지_출고반영_${today}.xlsx`;
 
-  let response;
-  try {
-    const requestPayload = {
-      mode: "outbound",
-      transactions: loadTransactions(),
-      file_name: fileName,
-    };
-    // Render/클라우드 모드에서는 서버 저장 템플릿을 우선 사용해 payload 크기를 줄인다.
-    if (!isCloudSyncEnabled()) {
-      requestPayload.template_b64 = arrayBufferToBase64(companyTemplateBuffer.slice(0));
-    }
-    response = await apiFetch("/api/export-company-with-outbound", {
-      method: "POST",
-      timeoutMs: EXPORT_API_TIMEOUT_MS,
-      body: JSON.stringify(requestPayload),
-    });
-  } catch {
-    throw new Error("원본 양식 보존 내보내기 API 연결에 실패했습니다. 서버 주소/실행 상태를 확인해 주세요.");
+  const requestPayload = {
+    mode: "outbound",
+    transactions: loadTransactions(),
+    file_name: fileName,
+  };
+  // Render/클라우드 모드에서는 서버 저장 템플릿을 우선 사용해 payload 크기를 줄인다.
+  if (!isCloudSyncEnabled()) {
+    requestPayload.template_b64 = arrayBufferToBase64(companyTemplateBuffer.slice(0));
   }
+  const response = await callExportApiWithRetry("/api/export-company-with-outbound", requestPayload);
 
   let result = null;
   try {
@@ -1971,26 +2019,17 @@ async function exportCompanyExcelByZones() {
   const today = formatDateValue(new Date().toISOString());
   const fileName = `4단지_출고반영_구역별_${today}.xlsx`;
 
-  let response;
-  try {
-    const requestPayload = {
-      mode: "zones",
-      transactions,
-      baseline_rows: baselineRows,
-      file_name: fileName,
-    };
-    // Render/클라우드 모드에서는 서버 저장 템플릿을 우선 사용해 payload 크기를 줄인다.
-    if (!isCloudSyncEnabled()) {
-      requestPayload.template_b64 = arrayBufferToBase64(companyTemplateBuffer.slice(0));
-    }
-    response = await apiFetch("/api/export-company-by-zones", {
-      method: "POST",
-      timeoutMs: EXPORT_API_TIMEOUT_MS,
-      body: JSON.stringify(requestPayload),
-    });
-  } catch {
-    throw new Error("원본 양식 보존 구역내보내기 API 연결에 실패했습니다. 서버 주소/실행 상태를 확인해 주세요.");
+  const requestPayload = {
+    mode: "zones",
+    transactions,
+    baseline_rows: baselineRows,
+    file_name: fileName,
+  };
+  // Render/클라우드 모드에서는 서버 저장 템플릿을 우선 사용해 payload 크기를 줄인다.
+  if (!isCloudSyncEnabled()) {
+    requestPayload.template_b64 = arrayBufferToBase64(companyTemplateBuffer.slice(0));
   }
+  const response = await callExportApiWithRetry("/api/export-company-by-zones", requestPayload);
 
   let result = null;
   try {
