@@ -243,21 +243,22 @@ def estimate_zone_sheet_bounds(source_ws, analyzed: Dict[str, object]) -> Tuple[
     item_rows = analyzed.get("item_rows", [])
     month_day_to_col = analyzed.get("month_day_to_col", {})
 
-    max_item_row = max([int(info["row"]) for info in item_rows], default=12)
+    max_item_row = max([int(info["row"]) for info in item_rows], default=20)
     max_day_col = max(month_day_to_col.values(), default=24)
 
     # 날짜영역 오른쪽 합계/보조열을 위해 여유 컬럼 포함
-    max_col = max(max_day_col + 8, 40)
+    max_col = max(max_day_col + 8, 34)
     source_max_col = int(getattr(source_ws, "max_column", max_col) or max_col)
     if source_max_col > 0:
         # 비정상적으로 큰 컬럼 범위(전열 서식) 방지
-        max_col = min(max_col, source_max_col, 180)
+        max_col = min(max_col, source_max_col, 90)
 
-    max_row = max(max_item_row + 3, 12)
+    # 템플릿 하단 여유행을 조금 포함하되, 과도한 전행 서식 복사 방지
+    max_row = max(max_item_row + 6, 24)
     source_max_row = int(getattr(source_ws, "max_row", max_row) or max_row)
     if source_max_row > 0:
         # 비정상적으로 큰 행 범위(전행 서식) 방지
-        max_row = min(max_row, source_max_row, 6000)
+        max_row = min(max_row, source_max_row, 800)
 
     return max_row, max_col
 
