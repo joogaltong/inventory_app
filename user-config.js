@@ -17,12 +17,12 @@ window.APP_CONFIG = {
     stateRowId: "4danji-main",
   },
   cloudSync: {
-  enabled: true,
-  baseUrl: "https://inventory-app-4hjr.onrender.com",
-  token: "olfapo_4danji_2026_secure_token_928374",
-  pullOnInit: true,
-  autoPush: true,
-  pushDebounceMs: 1200,
-  timeoutMs: 15000,
-},
-
+    enabled: true,
+    baseUrl: "https://inventory-app-4hjr.onrender.com",
+    token: "olfapo_4danji_2026_secure_token_928374",
+    pullOnInit: true,
+    autoPush: true,
+    pushDebounceMs: 1200,
+    timeoutMs: 15000,
+  },
+};
