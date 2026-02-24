@@ -496,6 +496,7 @@ function normalizeMinStockMap(value) {
 
 function getStatePayloadForServer() {
   const templateMeta = loadJSON(KEYS.templateMeta, null);
+  const templateBlobB64 = String(localStorage.getItem(KEYS.templateBlobB64) || "").trim();
   return {
     transactions: loadTransactions(),
     minStock: loadMinStockMap(),
@@ -503,6 +504,7 @@ function getStatePayloadForServer() {
     activeView: normalizeView(localStorage.getItem(KEYS.view) || "home"),
     gsheetUrl: loadGsheetUrl(),
     templateMeta: templateMeta && typeof templateMeta === "object" ? templateMeta : null,
+    templateBlobB64,
   };
 }
 
@@ -523,6 +525,7 @@ function applyServerStateToLocal(serverState) {
   const activeView = normalizeView(serverState?.activeView || "home");
   const gsheetUrl = String(serverState?.gsheetUrl || "").trim();
   const templateMeta = serverState?.templateMeta && typeof serverState.templateMeta === "object" ? serverState.templateMeta : null;
+  const templateBlobB64 = String(serverState?.templateBlobB64 || "").trim();
 
   withCloudPushSuspended(() => {
     saveJSON(KEYS.tx, tx, { skipSync: true });
@@ -530,6 +533,13 @@ function applyServerStateToLocal(serverState) {
     saveJSON(KEYS.baseline, baseline, { skipSync: true });
     localStorage.setItem(KEYS.view, activeView);
     saveGsheetUrl(gsheetUrl || getDefaultGoogleSheetUrl(), { skipSync: true });
+    if (templateBlobB64) {
+      localStorage.setItem(KEYS.templateBlobB64, templateBlobB64);
+      companyTemplateBuffer = null;
+    } else {
+      localStorage.removeItem(KEYS.templateBlobB64);
+      companyTemplateBuffer = null;
+    }
     if (templateMeta) {
       saveJSON(KEYS.templateMeta, templateMeta, { skipSync: true });
     } else {
@@ -934,9 +944,21 @@ async function loadCompanyTemplateBuffer() {
 async function ensureCompanyTemplateBufferLoaded() {
   if (companyTemplateBuffer) return true;
   const loaded = await loadCompanyTemplateBuffer();
-  if (!loaded) return false;
-  companyTemplateBuffer = loaded;
-  return true;
+  if (loaded) {
+    companyTemplateBuffer = loaded;
+    return true;
+  }
+
+  // 로컬에 템플릿이 없으면 서버 템플릿을 1회 당겨와서 내보내기를 이어간다.
+  if (isCloudSyncEnabled()) {
+    try {
+      const pulled = await pullTemplateFromServer();
+      if (pulled && companyTemplateBuffer) return true;
+    } catch (error) {
+      console.warn("[template] remote pull failed:", error.message || error);
+    }
+  }
+  return false;
 }
 
 async function clearCompanyTemplateBuffer() {
@@ -2630,15 +2652,7 @@ async function init() {
 
   let restoredTemplate = false;
   try {
-    if (!companyTemplateBuffer) {
-      const savedBuffer = await loadCompanyTemplateBuffer();
-      if (savedBuffer) {
-        companyTemplateBuffer = savedBuffer;
-        restoredTemplate = true;
-      }
-    } else {
-      restoredTemplate = true;
-    }
+    restoredTemplate = await ensureCompanyTemplateBufferLoaded();
   } catch {
     restoredTemplate = false;
   }
