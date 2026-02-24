@@ -145,6 +145,7 @@ const CLOUD_AUTO_PUSH = CLOUD_CONFIG.autoPush !== false;
 const CLOUD_PUSH_DEBOUNCE_MS = Math.max(300, Number(CLOUD_CONFIG.pushDebounceMs || 1200));
 const CLOUD_REQUEST_TIMEOUT_MS = Math.max(3000, Number(CLOUD_CONFIG.timeoutMs || 15000));
 const REMOTE_SYNC_ENABLED = CLOUD_SYNC_ENABLED || SUPABASE_SYNC_ENABLED;
+const EXPORT_API_TIMEOUT_MS = Math.max(45000, Number(APP_CONFIG.exportTimeoutMs || 180000));
 
 let selectedType = "전체";
 let selectedStockZone = "전체";
@@ -1880,6 +1881,7 @@ async function exportCompanyExcelWithOutbound() {
     }
     response = await apiFetch("/api/export-company-with-outbound", {
       method: "POST",
+      timeoutMs: EXPORT_API_TIMEOUT_MS,
       body: JSON.stringify(requestPayload),
     });
   } catch {
@@ -1953,6 +1955,7 @@ async function exportCompanyExcelByZones() {
     }
     response = await apiFetch("/api/export-company-by-zones", {
       method: "POST",
+      timeoutMs: EXPORT_API_TIMEOUT_MS,
       body: JSON.stringify(requestPayload),
     });
   } catch {
